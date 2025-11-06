@@ -18,19 +18,31 @@ import argparse
 from pathlib import Path
 
 class TrajectoryAnalyzer:
-    def __init__(self, xyz_file, support_n=240, cluster_n=None, output_prefix=""):
+    def __init__(self, xyz_file, support_n=240, cluster_n=None, output_prefix="", 
+                 surface_output=None, cluster_output=None, index_output=None, 
+                 save_wrapped=False, wrapped_output=None):
         """
         Parameters:
             xyz_file: Input unwrapped XYZ trajectory file
             support_n: Number of Support atoms (default 240)
             cluster_n: Number of Cluster atoms (default: None, auto-calculated from total - support)
             output_prefix: Prefix for output filenames (default: empty)
+            surface_output: Custom filename for surface-centered trajectory
+            cluster_output: Custom filename for cluster-centered trajectory
+            index_output: Custom filename for index file
+            save_wrapped: Save the original wrapped trajectory
+            wrapped_output: Custom filename for wrapped trajectory
         """
         self.xyz_file = Path(xyz_file)
         self.support_n = support_n
         self.cluster_n = cluster_n  # Will be set after reading file
         self.total_atoms = None  # Will be set after reading file
         self.output_prefix = output_prefix
+        self.surface_output = surface_output
+        self.cluster_output = cluster_output
+        self.index_output = index_output
+        self.save_wrapped = save_wrapped
+        self.wrapped_output = wrapped_output
         
         # Store data
         self.frames = []
@@ -38,6 +50,7 @@ class TrajectoryAnalyzer:
         self.atom_types = []
         self.support_ids = []
         self.cluster_ids = []
+        self.original_frames = None  # Store original wrapped frames if needed
         
     def read_xyz(self):
         """Read extended XYZ format trajectory"""
@@ -95,6 +108,10 @@ class TrajectoryAnalyzer:
         
         self.frames = np.array(self.frames)
         self.box_vectors = np.array(self.box_vectors)
+        
+        # Save original wrapped frames if requested
+        if self.save_wrapped:
+            self.original_frames = self.frames.copy()
         
         print(f"Successfully read {frame_count} frames, {self.total_atoms} atoms per frame")
         print(f"   Box size: {self.box_vectors[0]}")
@@ -352,7 +369,7 @@ class TrajectoryAnalyzer:
             f.write("\n\n")
             
             # Cluster group
-            f.write("[ PtSnCluster ]\n")
+            f.write("[ PtSnOCluster ]\n")
             for i, atom_id in enumerate(self.cluster_ids + 1):
                 f.write(f"{atom_id:5d} ")
                 if (i + 1) % 15 == 0:
@@ -404,23 +421,38 @@ class TrajectoryAnalyzer:
                     print("User cancelled operation")
                     return
         
-        # 5. Generate index file
-        index_file = f"{self.output_prefix}index_zsplit.ndx" if self.output_prefix else "index_zsplit.ndx"
+        # 5. Save original wrapped trajectory if requested
+        if self.save_wrapped and self.original_frames is not None:
+            wrapped_file = self.wrapped_output if self.wrapped_output else f"{self.output_prefix}wrapped_original.xyz"
+            print(f"\nSaving original wrapped trajectory...")
+            self._write_xyz(self.original_frames, wrapped_file, "Original wrapped")
+            print(f"   Saved to: {wrapped_file}")
+        
+        # 6. Generate index file
+        index_file = self.index_output if self.index_output else (
+            f"{self.output_prefix}index_zsplit.ndx" if self.output_prefix else "index_zsplit.ndx"
+        )
         self.generate_index_file(index_file)
         
-        # 6. Generate support-centered trajectory
-        surface_file = f"{self.output_prefix}surface_centered.xyz" if self.output_prefix else "surface_centered.xyz"
+        # 7. Generate support-centered trajectory
+        surface_file = self.surface_output if self.surface_output else (
+            f"{self.output_prefix}surface_centered.xyz" if self.output_prefix else "surface_centered.xyz"
+        )
         self.center_trajectory('support', surface_file)
         
-        # 7. Generate cluster-centered trajectory
-        cluster_file = f"{self.output_prefix}cluster_centered.xyz" if self.output_prefix else "cluster_centered.xyz"
+        # 8. Generate cluster-centered trajectory
+        cluster_file = self.cluster_output if self.cluster_output else (
+            f"{self.output_prefix}cluster_centered.xyz" if self.output_prefix else "cluster_centered.xyz"
+        )
         self.center_trajectory('cluster', cluster_file)
         
         print("\n" + "=" * 70)
         print("Processing complete! Generated files:")
-        print(f"   - {index_file:30s} (atom group indices)")
-        print(f"   - {surface_file:30s} (support-centered, for surface migration)")
-        print(f"   - {cluster_file:30s} (cluster-centered, for internal rearrangement)")
+        print(f"   - {index_file:40s} (atom group indices)")
+        if self.save_wrapped and self.original_frames is not None:
+            print(f"   - {wrapped_file:40s} (original wrapped trajectory)")
+        print(f"   - {surface_file:40s} (support-centered, for surface migration)")
+        print(f"   - {cluster_file:40s} (cluster-centered, for internal rearrangement)")
         print("=" * 70)
 
 
@@ -433,12 +465,14 @@ Examples:
   %(prog)s sampling-simply.xyz
   %(prog)s traj.xyz --support 240 --cluster 14
   %(prog)s data.xyz --output my_analysis_
-  %(prog)s simulation.xyz --support 200 --cluster 20 --output run1_
+  %(prog)s simulation.xyz --surface-out unwrapped.xyz --cluster-out centered.xyz
+  %(prog)s traj.xyz --save-wrapped --wrapped-out original.xyz
 
 Output files:
   - index_zsplit.ndx         : GROMACS-style atom group indices
   - surface_centered.xyz     : Support-centered trajectory (for surface migration)
   - cluster_centered.xyz     : Cluster-centered trajectory (for internal rearrangement)
+  - wrapped_original.xyz     : Original wrapped trajectory (if --save-wrapped)
         """
     )
     
@@ -456,10 +490,39 @@ Output files:
                        type=str, 
                        default='',
                        help='Prefix for output filenames (default: none)')
+    parser.add_argument('--surface-out', 
+                       type=str, 
+                       default=None,
+                       help='Custom filename for surface-centered trajectory')
+    parser.add_argument('--cluster-out', 
+                       type=str, 
+                       default=None,
+                       help='Custom filename for cluster-centered trajectory')
+    parser.add_argument('--index-out', 
+                       type=str, 
+                       default=None,
+                       help='Custom filename for index file')
+    parser.add_argument('--save-wrapped', 
+                       action='store_true',
+                       help='Save the original wrapped trajectory')
+    parser.add_argument('--wrapped-out', 
+                       type=str, 
+                       default=None,
+                       help='Custom filename for wrapped trajectory (requires --save-wrapped)')
     
     args = parser.parse_args()
     
-    analyzer = TrajectoryAnalyzer(args.trajectory, args.support, args.cluster, args.output)
+    analyzer = TrajectoryAnalyzer(
+        args.trajectory, 
+        args.support, 
+        args.cluster, 
+        args.output,
+        args.surface_out,
+        args.cluster_out,
+        args.index_out,
+        args.save_wrapped,
+        args.wrapped_out
+    )
     analyzer.run()
 
 
