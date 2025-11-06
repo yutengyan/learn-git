@@ -14,20 +14,23 @@ Features:
 
 import numpy as np
 import sys
+import argparse
 from pathlib import Path
 
 class TrajectoryAnalyzer:
-    def __init__(self, xyz_file, support_n=240, cluster_n=14):
+    def __init__(self, xyz_file, support_n=240, cluster_n=None, output_prefix=""):
         """
         Parameters:
             xyz_file: Input unwrapped XYZ trajectory file
             support_n: Number of Support atoms (default 240)
-            cluster_n: Number of Cluster atoms (default 14)
+            cluster_n: Number of Cluster atoms (default: None, auto-calculated from total - support)
+            output_prefix: Prefix for output filenames (default: empty)
         """
         self.xyz_file = Path(xyz_file)
         self.support_n = support_n
-        self.cluster_n = cluster_n
-        self.total_atoms = support_n + cluster_n
+        self.cluster_n = cluster_n  # Will be set after reading file
+        self.total_atoms = None  # Will be set after reading file
+        self.output_prefix = output_prefix
         
         # Store data
         self.frames = []
@@ -52,6 +55,17 @@ class TrajectoryAnalyzer:
                 n_atoms = int(lines[i].strip())
             except:
                 break
+            
+            # Set total atoms from first frame
+            if frame_count == 0:
+                self.total_atoms = n_atoms
+                # Auto-calculate cluster atoms if not specified
+                if self.cluster_n is None:
+                    self.cluster_n = self.total_atoms - self.support_n
+                    print(f"Auto-detected: {self.total_atoms} total atoms = {self.support_n} support + {self.cluster_n} cluster")
+                else:
+                    if self.support_n + self.cluster_n != n_atoms:
+                        print(f"WARNING: support({self.support_n}) + cluster({self.cluster_n}) = {self.support_n + self.cluster_n} != total({n_atoms})")
             
             if n_atoms != self.total_atoms:
                 print(f"Warning: Frame {frame_count} has {n_atoms} atoms, expected {self.total_atoms}")
@@ -103,9 +117,9 @@ class TrajectoryAnalyzer:
         z_coords = self.frames[0, :, 2]
         sorted_ids = np.argsort(z_coords)
         
-        # First 240 are Support, last 14 are Cluster
+        # First support_n are Support, remaining are Cluster
         self.support_ids = sorted_ids[:self.support_n]
-        self.cluster_ids = sorted_ids[self.support_n:self.support_n + self.cluster_n]
+        self.cluster_ids = sorted_ids[self.support_n:]
         
         # Count element composition
         support_elements = [self.atom_types[i] for i in self.support_ids]
@@ -321,8 +335,11 @@ class TrajectoryAnalyzer:
                 for atom_idx, (atom_type, coords) in enumerate(zip(self.atom_types, frame)):
                     f.write(f"{atom_type} {coords[0]:.8f} {coords[1]:.8f} {coords[2]:.8f}\n")
     
-    def generate_index_file(self, output_file="index_zsplit.ndx"):
+    def generate_index_file(self, output_file=None):
         """Generate GROMACS-style index file"""
+        if output_file is None:
+            output_file = f"{self.output_prefix}index_zsplit.ndx" if self.output_prefix else "index_zsplit.ndx"
+        
         print(f"\nGenerating index file: {output_file}")
         
         with open(output_file, 'w') as f:
@@ -388,35 +405,61 @@ class TrajectoryAnalyzer:
                     return
         
         # 5. Generate index file
-        self.generate_index_file()
+        index_file = f"{self.output_prefix}index_zsplit.ndx" if self.output_prefix else "index_zsplit.ndx"
+        self.generate_index_file(index_file)
         
         # 6. Generate support-centered trajectory
-        self.center_trajectory('support', 'surface_centered.xyz')
+        surface_file = f"{self.output_prefix}surface_centered.xyz" if self.output_prefix else "surface_centered.xyz"
+        self.center_trajectory('support', surface_file)
         
         # 7. Generate cluster-centered trajectory
-        self.center_trajectory('cluster', 'cluster_centered.xyz')
+        cluster_file = f"{self.output_prefix}cluster_centered.xyz" if self.output_prefix else "cluster_centered.xyz"
+        self.center_trajectory('cluster', cluster_file)
         
         print("\n" + "=" * 70)
         print("Processing complete! Generated files:")
-        print("   - index_zsplit.ndx       (atom group indices)")
-        print("   - surface_centered.xyz   (support-centered, for surface migration)")
-        print("   - cluster_centered.xyz   (cluster-centered, for internal rearrangement)")
+        print(f"   - {index_file:30s} (atom group indices)")
+        print(f"   - {surface_file:30s} (support-centered, for surface migration)")
+        print(f"   - {cluster_file:30s} (cluster-centered, for internal rearrangement)")
         print("=" * 70)
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python analyze_ptsn_trajectory.py <trajectory.xyz> [support_n] [cluster_n]")
-        print("\nExamples:")
-        print("  python analyze_ptsn_trajectory.py sampling-simply.xyz")
-        print("  python analyze_ptsn_trajectory.py traj.xyz 240 14")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='Sn7Pt4O3/Al2O3 Trajectory Processing - Dual-Mode Centering Analysis',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s sampling-simply.xyz
+  %(prog)s traj.xyz --support 240 --cluster 14
+  %(prog)s data.xyz --output my_analysis_
+  %(prog)s simulation.xyz --support 200 --cluster 20 --output run1_
+
+Output files:
+  - index_zsplit.ndx         : GROMACS-style atom group indices
+  - surface_centered.xyz     : Support-centered trajectory (for surface migration)
+  - cluster_centered.xyz     : Cluster-centered trajectory (for internal rearrangement)
+        """
+    )
     
-    xyz_file = sys.argv[1]
-    support_n = int(sys.argv[2]) if len(sys.argv) > 2 else 240
-    cluster_n = int(sys.argv[3]) if len(sys.argv) > 3 else 14
+    parser.add_argument('trajectory', 
+                       help='Input XYZ trajectory file')
+    parser.add_argument('--support', '-s', 
+                       type=int, 
+                       default=240,
+                       help='Number of support atoms (default: 240)')
+    parser.add_argument('--cluster', '-c', 
+                       type=int, 
+                       default=None,
+                       help='Number of cluster atoms (default: auto-calculate from total - support)')
+    parser.add_argument('--output', '-o', 
+                       type=str, 
+                       default='',
+                       help='Prefix for output filenames (default: none)')
     
-    analyzer = TrajectoryAnalyzer(xyz_file, support_n, cluster_n)
+    args = parser.parse_args()
+    
+    analyzer = TrajectoryAnalyzer(args.trajectory, args.support, args.cluster, args.output)
     analyzer.run()
 
 
