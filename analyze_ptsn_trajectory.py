@@ -133,39 +133,55 @@ class TrajectoryAnalyzer:
     
     def make_cluster_whole(self):
         """
-        Reassemble cluster atoms that are split across periodic boundaries
-        Uses the first cluster atom as reference and brings others close via minimum image
+        Reassemble cluster atoms that are split across periodic boundaries in FIRST frame only
+        Uses iterative center-of-mass method to bring all atoms together
+        This only fixes the first frame; unwrap_trajectory will maintain integrity for subsequent frames
         """
-        print("\nReassembling cluster (making whole)...")
+        print("\nReassembling cluster in first frame (making whole)...")
         
-        for frame_idx in range(len(self.frames)):
-            frame = self.frames[frame_idx]
-            box = self.box_vectors[frame_idx]
+        frame = self.frames[0]
+        box = self.box_vectors[0]
+        
+        cluster_coords = frame[self.cluster_ids].copy()
+        
+        # Iterative method: repeatedly apply minimum image relative to COM
+        max_iterations = 10
+        for iteration in range(max_iterations):
+            # Calculate current center of mass
+            com = cluster_coords.mean(axis=0)
             
-            # Use first cluster atom as reference
-            ref_pos = frame[self.cluster_ids[0]].copy()
-            
-            # Bring all other cluster atoms close to reference using minimum image
-            for cluster_idx in self.cluster_ids[1:]:
-                atom_pos = frame[cluster_idx]
-                delta = atom_pos - ref_pos
+            # Apply minimum image to bring each atom close to COM
+            moved = False
+            for i, cluster_idx in enumerate(self.cluster_ids):
+                delta = cluster_coords[i] - com
                 
-                # Apply minimum image convention
                 for dim in range(3):
                     if delta[dim] > box[dim] / 2.0:
-                        frame[cluster_idx, dim] -= box[dim]
+                        cluster_coords[i, dim] -= box[dim]
+                        moved = True
                     elif delta[dim] < -box[dim] / 2.0:
-                        frame[cluster_idx, dim] += box[dim]
+                        cluster_coords[i, dim] += box[dim]
+                        moved = True
+            
+            # Update frame with corrected coordinates
+            frame[self.cluster_ids] = cluster_coords
+            
+            # Check if converged (no more moves needed)
+            if not moved:
+                print(f"   Converged after {iteration + 1} iterations")
+                break
         
         # Verify cluster is now compact
-        cluster_coords = self.frames[0, self.cluster_ids, :]
         from scipy.spatial.distance import pdist
         max_dist = pdist(cluster_coords).max()
+        avg_dist = pdist(cluster_coords).mean()
         
         print(f"   First frame cluster max internal distance: {max_dist:.2f} A")
+        print(f"   First frame cluster avg internal distance: {avg_dist:.2f} A")
         
         if max_dist > 10.0:
             print(f"   WARNING: Cluster still appears fragmented (max dist > 10 A)")
+            print(f"   This may indicate a very dispersed cluster or incorrect atom grouping")
         else:
             print(f"   OK: Cluster is now compact")
     
